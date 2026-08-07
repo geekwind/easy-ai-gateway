@@ -1,0 +1,439 @@
+@page "/services"
+@inject HttpClient Http
+@inject IJSRuntime JS
+@inject ToastService Toasts
+
+<PageTitle>服务管理</PageTitle>
+
+<div class="eg-pagehead">
+    <div>
+        <h1 class="eg-title">服务管理</h1>
+        <p class="eg-sub">管理上游 AI 服务与其模型映射</p>
+    </div>
+    <button class="btn btn-primary" @onclick="OpenCreate">+ 新建服务</button>
+</div>
+
+@if (services is null)
+{
+    <p><span class="spinner-border spinner-border-sm"></span> 加载中...</p>
+}
+else if (services.Count == 0)
+{
+    <div class="alert alert-info">还没有配置任何服务。点击「新建服务」或<a href="">回到仪表盘初始化示例</a>。</div>
+}
+else
+{
+    <div class="eg-table-card">
+    <table class="table table-hover align-middle">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>名称</th>
+                <th>类型</th>
+                <th>上游地址</th>
+                <th>状态</th>
+                <th>模型数</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var s in services)
+            {
+                <tr>
+                    <td>@s.Id</td>
+                    <td>@s.Name</td>
+                    <td><span class="badge bg-info text-dark">@s.ProviderType</span></td>
+                    <td><small class="text-muted">@Truncate(s.ServerUrl, 50)</small></td>
+                    <td>
+                        @if (s.Enabled)
+                        { <span class="badge bg-success">启用</span> }
+                        else
+                        { <span class="badge bg-secondary">停用</span> }
+                    </td>
+                    <td>@(s.Models?.Count ?? 0)</td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-success me-1" disabled="@IsBusy(s.Id, "test")" @onclick="() => TestService(s.Id)">
+                            @if (IsBusy(s.Id, "test")) { <span class="spinner-border spinner-border-sm"></span> } else { <text>测试</text> }
+                        </button>
+                        <button class="btn btn-sm btn-outline-info me-1" disabled="@IsBusy(s.Id, "discover")" @onclick="() => DiscoverModels(s.Id)">
+                            @if (IsBusy(s.Id, "discover")) { <span class="spinner-border spinner-border-sm"></span> <text>发现中…</text> } else { <text>发现模型</text> }
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary me-1" @onclick="() => EditModels(s)">模型</button>
+                        <button class="btn btn-sm btn-outline-warning me-1" @onclick="() => OpenEdit(s)">编辑</button>
+                        <button class="btn btn-sm btn-outline-secondary me-1" disabled="@IsBusy(s.Id, "clone")" @onclick="() => CloneService(s)">克隆</button>
+                        <button class="btn btn-sm btn-outline-danger" disabled="@IsBusy(s.Id, "del")" @onclick="() => DeleteService(s.Id)">删除</button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    </div>
+}
+@if (showEditor)
+{
+    <div class="modal d-block" tabindex="-1" style="background:rgba(0,0,0,.5)">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">@(editing.Id == 0 ? "新建服务" : $"编辑服务 #{editing.Id}")</h5>
+                    <button type="button" class="btn-close" @onclick="CloseEditor"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">名称</label>
+                            <input class="form-control" @bind="editing.Name" />
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Provider 类型</label>
+                            <select class="form-select" @bind="editing.ProviderType">
+                                @foreach (var t in providerTypes ?? new())
+                                { <option value="@t">@t</option> }
+                            </select>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label">上游地址 (ServerUrl)</label>
+                            <input class="form-control" placeholder="https://api.example.com/v1" @bind="editing.ServerUrl" />
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label">API Key</label>
+                            <input class="form-control font-monospace" type="password" placeholder="sk-..." @bind="editingApiKey" />
+                            <small class="text-muted">上游服务的 API Key，自动存储为凭据</small>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">权重</label>
+                            <InputNumber class="form-control" @bind-Value="editing.Weight" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">优先级</label>
+                            <InputNumber class="form-control" @bind-Value="editing.Priority" />
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end">
+                            <div class="form-check">
+                                <InputCheckbox id="en" @bind-Value="editing.Enabled" />
+                                <label class="form-check-label" for="en">启用</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" @onclick="CloseEditor">取消</button>
+                    <button class="btn btn-primary" @onclick="SaveService" disabled="@saving">
+                        @if (saving) { <span class="spinner-border spinner-border-sm"></span> <text> 保存中…</text> } else { <text>保存</text> }
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- 模型管理 Modal -->
+@if (showModels)
+{
+    <div class="modal d-block" tabindex="-1" style="background:rgba(0,0,0,.5)">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">模型管理 — @modelsService?.Name <small class="text-muted fs-6">(@(models?.Count ?? 0) 个)</small></h5>
+                    <button type="button" class="btn-close" @onclick="CloseModels"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info py-2 small">
+                        <strong>模型映射</strong>：ModelName 是客户端看到的名称；UpstreamModel 是发给上游的真实名（留空=同 ModelName）；Aliases 是额外匹配名（逗号分隔）。
+                        点击表格中的行可直接编辑该模型。
+                    </div>
+                    <div class="row g-2 mb-3">
+                        <div class="col-md-3">
+                            <input class="form-control" placeholder="模型名称 (客户端)" @bind="newModelName" />
+                        </div>
+                        <div class="col-md-3">
+                            <input class="form-control" placeholder="上游真实名 (留空=同名)" @bind="newModelUpstream" />
+                        </div>
+                        <div class="col-md-3">
+                            <input class="form-control" placeholder="别名 (逗号分隔)" @bind="newModelAliases" />
+                        </div>
+                        <div class="col-md-1">
+                            <div class="form-check">
+                                <InputCheckbox id="vis" @bind-Value="newModelVision" />
+                                <label class="form-check-label" for="vis">视觉</label>
+                            </div>
+                        </div>
+                        <div class="col-md-1">
+                            <div class="form-check">
+                                <InputCheckbox id="tool" @bind-Value="newModelTools" />
+                                <label class="form-check-label" for="tool">工具</label>
+                            </div>
+                        </div>
+                        <div class="col-md-1">
+                            <button class="btn btn-outline-primary w-100" @onclick="AddModel">+</button>
+                        </div>
+                    </div>
+                    <table class="table table-sm table-hover align-middle">
+                        <thead><tr><th>客户端名</th><th>上游名</th><th>别名</th><th>视觉</th><th>工具</th><th>启用</th><th style="width:130px"></th></tr></thead>
+                        <tbody>
+                            @foreach (var m in models ?? new())
+                            {
+                                @if (editingModelId == m.Id)
+                                {
+                                    <tr class="table-active">
+                                        <td><input class="form-control form-control-sm" @bind="editingModel.ModelName" /></td>
+                                        <td><input class="form-control form-control-sm" placeholder="(同名)" @bind="editingModel.UpstreamModel" /></td>
+                                        <td><input class="form-control form-control-sm" placeholder="别名 (逗号分隔)" @bind="editingModel.Aliases" /></td>
+                                        <td><input type="checkbox" class="form-check-input" @bind="editingModel.SupportsVision" /></td>
+                                        <td><input type="checkbox" class="form-check-input" @bind="editingModel.SupportsTools" /></td>
+                                        <td><input type="checkbox" class="form-check-input" @bind="editingModel.Enabled" /></td>
+                                        <td class="text-nowrap">
+                                            <button class="btn btn-sm btn-primary me-1" @onclick="SaveModelEdit">保存</button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelModelEdit">取消</button>
+                                        </td>
+                                    </tr>
+                                }
+                                else
+                                {
+                                    <tr style="cursor:pointer" title="点击编辑" @onclick="() => StartModelEdit(m)">
+                                        <td>@m.ModelName</td>
+                                        <td><small class="text-muted">@(string.IsNullOrEmpty(m.UpstreamModel) ? "(同名)" : m.UpstreamModel)</small></td>
+                                        <td><small class="text-muted">@m.Aliases</small></td>
+                                        <td>@(m.SupportsVision ? "✓" : "")</td>
+                                        <td>@(m.SupportsTools ? "✓" : "")</td>
+                                        <td>@(m.Enabled ? "✓" : "")</td>
+                                        <td><button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteModel(m.Id)" @onclick:stopPropagation="true">删除</button></td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<ServiceEntity>? services;
+    private List<string>? providerTypes;
+    private bool showEditor;
+    private bool showModels;
+    private ServiceEntity editing = new();
+    private string editingApiKey = "";
+    private ServiceEntity? modelsService;
+    private List<ModelEntity>? models;
+    private int editingModelId;
+    private ModelEntity editingModel = new();
+    private string newModelName = "";
+    private string newModelUpstream = "";
+    private string newModelAliases = "";
+    private bool newModelVision;
+    private bool newModelTools;
+    private readonly HashSet<string> busy = new();
+    private bool saving;
+
+    private bool IsBusy(int id, string op) => busy.Contains($"{op}:{id}");
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        try { providerTypes = await Http.GetFromJsonAsync<List<string>>("/admin/provider-types"); } catch { }
+    }
+
+    private async Task LoadAsync()
+    {
+        try { services = await Http.GetFromJsonAsync<List<ServiceEntity>>("/admin/services"); }
+        catch { services = new(); }
+    }
+
+    private void OpenCreate()
+    {
+        editing = new ServiceEntity { ProviderType = "openai", Enabled = true, CredentialsJson = "{}", Weight = 1 };
+        editingApiKey = "";
+        showEditor = true;
+    }
+
+    private void OpenEdit(ServiceEntity s)
+    {
+        editing = new ServiceEntity
+        {
+            Id = s.Id, Name = s.Name, ProviderType = s.ProviderType,
+            ServerUrl = s.ServerUrl, Enabled = s.Enabled, Weight = s.Weight,
+            Priority = s.Priority, CredentialsJson = s.CredentialsJson,
+        };
+        // Extract api_key from existing credentials JSON for editing.
+        try { editingApiKey = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(s.CredentialsJson ?? "{}")?.GetValueOrDefault("api_key", "") ?? ""; }
+        catch { editingApiKey = ""; }
+        showEditor = true;
+    }
+
+    private void CloseEditor() => showEditor = false;
+
+    private async Task SaveService()
+    {
+        saving = true;
+        try
+        {
+            // Pack the api_key into credentials JSON before saving.
+            editing.CredentialsJson = System.Text.Json.JsonSerializer.Serialize(
+                new Dictionary<string, string> { ["api_key"] = editingApiKey ?? "" });
+            var resp = editing.Id == 0
+                ? await Http.PostAsJsonAsync("/admin/services", editing)
+                : await Http.PutAsJsonAsync($"/admin/services/{editing.Id}", editing);
+            if (resp.IsSuccessStatusCode)
+            {
+                showEditor = false;
+                Toasts.Ok(editing.Id == 0 ? "服务已创建" : "服务已保存");
+                await LoadAsync();
+            }
+            else
+            {
+                Toasts.Error(await resp.Content.ReadAsStringAsync());
+            }
+        }
+        finally { saving = false; }
+    }
+
+    private async Task CloneService(ServiceEntity s)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", $"克隆服务「{s.Name}」及其全部模型？克隆出的副本默认停用。")) return;
+        busy.Add($"clone:{s.Id}");
+        try
+        {
+            var resp = await Http.PostAsync($"/admin/services/{s.Id}/clone", null);
+            if (resp.IsSuccessStatusCode) Toasts.Ok($"已克隆「{s.Name}」（默认停用）");
+            else Toasts.Error(await resp.Content.ReadAsStringAsync());
+            await LoadAsync();
+        }
+        finally { busy.Remove($"clone:{s.Id}"); }
+    }
+
+    private async Task DeleteService(int id)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", "确认删除此服务及其所有模型？")) return;
+        busy.Add($"del:{id}");
+        try
+        {
+            await Http.DeleteAsync($"/admin/services/{id}");
+            Toasts.Ok("服务已删除");
+            await LoadAsync();
+        }
+        finally { busy.Remove($"del:{id}"); }
+    }
+
+    private async Task TestService(int id)
+    {
+        busy.Add($"test:{id}");
+        try
+        {
+            var resp = await Http.PostAsync($"/admin/services/{id}/test", null);
+            var result = await resp.Content.ReadFromJsonAsync<TestResult>();
+            if (result!.ok) Toasts.Ok($"连通成功，模型: {result.model}");
+            else Toasts.Error($"测试失败: {result.error}");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"请求失败: {ex.Message}");
+        }
+        finally { busy.Remove($"test:{id}"); }
+    }
+
+    private async Task DiscoverModels(int id)
+    {
+        busy.Add($"discover:{id}");
+        try
+        {
+            var resp = await Http.PostAsync($"/admin/services/{id}/discover-models", null);
+            var result = await resp.Content.ReadFromJsonAsync<DiscoverResult>();
+            if (result!.ok)
+            {
+                var msg = $"发现 {result.total} 个模型 · 新导入 {result.imported?.Count ?? 0} · 已存在跳过 {result.skipped?.Count ?? 0}";
+                Toasts.Ok(msg);
+            }
+            else
+            {
+                Toasts.Info(result.message ?? result.reason ?? "未发现新模型");
+            }
+            // Refresh models list if that service's modal is open.
+            if (modelsService?.Id == id)
+                models = await Http.GetFromJsonAsync<List<ModelEntity>>($"/admin/services/{id}/models");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"请求失败: {ex.Message}");
+        }
+        finally { busy.Remove($"discover:{id}"); }
+    }
+
+    private async Task EditModels(ServiceEntity s)
+    {
+        modelsService = s;
+        showModels = true;
+        try { models = await Http.GetFromJsonAsync<List<ModelEntity>>($"/admin/services/{s.Id}/models"); }
+        catch { models = new(); }
+    }
+
+    private void CloseModels()
+    {
+        showModels = false;
+        editingModelId = 0;
+    }
+
+    private void StartModelEdit(ModelEntity m)
+    {
+        editingModelId = m.Id;
+        // Edit a copy so 取消 leaves the row untouched.
+        editingModel = new ModelEntity
+        {
+            Id = m.Id, ServiceId = m.ServiceId,
+            ModelName = m.ModelName, UpstreamModel = m.UpstreamModel, Aliases = m.Aliases,
+            Enabled = m.Enabled, SupportsVision = m.SupportsVision, SupportsTools = m.SupportsTools,
+            SupportsReasoning = m.SupportsReasoning, SupportsEmbeddings = m.SupportsEmbeddings,
+        };
+    }
+
+    private void CancelModelEdit() => editingModelId = 0;
+
+    private async Task SaveModelEdit()
+    {
+        if (string.IsNullOrWhiteSpace(editingModel.ModelName))
+        {
+            await JS.InvokeVoidAsync("alert", "模型名称不能为空");
+            return;
+        }
+        var resp = await Http.PutAsJsonAsync($"/admin/models/{editingModel.Id}", editingModel);
+        if (!resp.IsSuccessStatusCode)
+        {
+            await JS.InvokeVoidAsync("alert", await resp.Content.ReadAsStringAsync());
+            return;
+        }
+        editingModelId = 0;
+        if (modelsService is not null)
+            models = await Http.GetFromJsonAsync<List<ModelEntity>>($"/admin/services/{modelsService.Id}/models");
+    }
+
+    private async Task AddModel()
+    {
+        if (modelsService is null || string.IsNullOrWhiteSpace(newModelName)) return;
+        var m = new ModelEntity
+        {
+            ModelName = newModelName.Trim(),
+            UpstreamModel = newModelUpstream.Trim(),
+            Aliases = newModelAliases.Trim(),
+            Enabled = true,
+            SupportsVision = newModelVision,
+            SupportsTools = newModelTools,
+        };
+        await Http.PostAsJsonAsync($"/admin/services/{modelsService.Id}/models", m);
+        newModelName = ""; newModelUpstream = ""; newModelAliases = ""; newModelVision = false; newModelTools = false;
+        models = await Http.GetFromJsonAsync<List<ModelEntity>>($"/admin/services/{modelsService.Id}/models");
+    }
+
+    private async Task DeleteModel(int id)
+    {
+        await Http.DeleteAsync($"/admin/models/{id}");
+        if (modelsService is not null)
+            models = await Http.GetFromJsonAsync<List<ModelEntity>>($"/admin/services/{modelsService.Id}/models");
+    }
+
+    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
+
+    private class TestResult { public bool ok { get; set; } public string? model { get; set; } public string? error { get; set; } }
+    private class DiscoverResult { public bool ok { get; set; } public string? reason { get; set; } public string? message { get; set; } public int total { get; set; } public List<string>? imported { get; set; } public List<string>? skipped { get; set; } }
+}

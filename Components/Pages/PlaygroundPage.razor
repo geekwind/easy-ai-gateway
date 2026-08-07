@@ -1,0 +1,245 @@
+@page "/playground"
+@inject HttpClient Http
+@inject IJSRuntime JS
+
+<PageTitle>测试</PageTitle>
+
+<div class="eg-pagehead">
+    <div>
+        <h1 class="eg-title">接口测试</h1>
+        <p class="eg-sub">使用网关的 API Key 与上游模型进行对话测试</p>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-3">
+        <label class="form-label">API Key</label>
+        <input class="form-control font-monospace" value="@apiKey" @oninput="e => apiKey = e.Value!.ToString()!" placeholder="sk-..." />
+    </div>
+    <div class="col-md-3">
+        <label class="form-label">模型</label>
+        <input class="form-control" value="@model" @oninput="e => model = e.Value!.ToString()!" placeholder="GLM-4-Flash" />
+    </div>
+    <div class="col-md-2">
+        <label class="form-label">协议</label>
+        <select class="form-select" value="@protocol" @onchange="e => protocol = e.Value!.ToString()!">
+            <option value="openai">OpenAI /v1/chat/completions</option>
+            <option value="anthropic">Anthropic /v1/messages</option>
+        </select>
+    </div>
+    <div class="col-md-1">
+        <label class="form-label">Max Tokens</label>
+        <input type="number" class="form-control" @bind="maxTokens" min="1" />
+    </div>
+    <div class="col-md-1 d-flex align-items-end">
+        <div class="form-check">
+            <input type="checkbox" id="stream" class="form-check-input" checked="@stream" @onchange="e => stream = (bool)e.Value!" />
+            <label class="form-check-label" for="stream">流式</label>
+        </div>
+    </div>
+    <div class="col-md-2 d-flex align-items-end">
+        <button class="btn btn-primary w-100" @onclick="Send" disabled="@busy">
+            @if (busy) { <span class="spinner-border spinner-border-sm"></span> } else { <text>发送</text> }
+        </button>
+    </div>
+</div>
+
+<div class="mb-3">
+    <label class="form-label">输入</label>
+    <textarea class="form-control" rows="3" value="@input" @oninput="e => input = e.Value!.ToString()!" placeholder="说点什么..."></textarea>
+</div>
+
+@if (!string.IsNullOrEmpty(reasoning))
+{
+    <details class="mb-2" open="@string.IsNullOrEmpty(response)">
+        <summary class="text-muted small" style="cursor:pointer">🤔 思考过程 (@reasoning.Length 字符)</summary>
+        <pre class="border rounded p-2 bg-light text-muted small mt-1" style="white-space:pre-wrap;max-height:240px;overflow-y:auto">@reasoning</pre>
+    </details>
+}
+
+<div>
+    <label class="form-label">响应 @(string.IsNullOrEmpty(finishReason) ? "" : $"(finish: {finishReason})")</label>
+    <pre class="border rounded p-3 bg-light" style="min-height:120px;white-space:pre-wrap">@response</pre>
+    @if (done && string.IsNullOrEmpty(response))
+    {
+        <div class="alert alert-warning py-2 small">
+            请求成功但没有正文输出。
+            @if (finishReason == "length" || !string.IsNullOrEmpty(reasoning))
+            {
+                <text>该模型是推理（thinking）模型，Max Tokens=@maxTokens 的配额被「思考过程」消耗完了——请调大 Max Tokens（建议 ≥1024）再试。</text>
+            }
+            else
+            {
+                <text>请检查调用日志中该请求的 finish_reason 与上游返回。</text>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private string apiKey = "sk-easygateway-local";
+    private string model = "GLM-4-Flash";
+    private string protocol = "openai";
+    private bool stream = true;
+    private int maxTokens = 1024;
+    private string input = "你好，请用一句话介绍你自己";
+    private string response = "";
+    private string reasoning = "";
+    private string finishReason = "";
+    private bool busy;
+    private bool done;
+
+    private async Task Send()
+    {
+        busy = true;
+        done = false;
+        response = "";
+        reasoning = "";
+        finishReason = "";
+        try
+        {
+            if (protocol == "openai")
+                await SendOpenAI();
+            else
+                await SendAnthropic();
+            done = true;
+        }
+        catch (Exception ex)
+        {
+            response = "错误: " + ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SendOpenAI()
+    {
+        var payload = new
+        {
+            model,
+            stream,
+            messages = new[] { new { role = "user", content = input } },
+            max_tokens = maxTokens,
+        };
+        var req = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions");
+        req.Headers.Add("Authorization", $"Bearer {apiKey}");
+        req.Content = JsonContent.Create(payload);
+
+        var resp = await Http.SendAsync(req, stream ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead);
+        if (!resp.IsSuccessStatusCode) { response = $"HTTP {(int)resp.StatusCode}: " + await resp.Content.ReadAsStringAsync(); return; }
+
+        if (stream)
+        {
+            using var sr = new StreamReader(await resp.Content.ReadAsStreamAsync());
+            while (!sr.EndOfStream)
+            {
+                var line = await sr.ReadLineAsync();
+                if (line is null) break;
+                if (!line.StartsWith("data:")) continue;
+                var data = line[5..].Trim();
+                if (data == "[DONE]") break;
+                using var doc = System.Text.Json.JsonDocument.Parse(data);
+                if (!doc.RootElement.TryGetProperty("choices", out var choices)) continue;
+                if (choices.GetArrayLength() == 0) continue;
+                var choice = choices[0];
+                if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == System.Text.Json.JsonValueKind.String)
+                    finishReason = fr.GetString() ?? "";
+                if (!choice.TryGetProperty("delta", out var delta)) continue;
+                var changed = false;
+                if (delta.TryGetProperty("reasoning_content", out var rc) && rc.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    reasoning += rc.GetString();
+                    changed = true;
+                }
+                if (delta.TryGetProperty("content", out var c) && c.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    response += c.GetString();
+                    changed = true;
+                }
+                if (changed) await InvokeAsync(StateHasChanged);
+            }
+        }
+        else
+        {
+            var json = await resp.Content.ReadAsStringAsync();
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var choice = doc.RootElement.GetProperty("choices")[0];
+            if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == System.Text.Json.JsonValueKind.String)
+                finishReason = fr.GetString() ?? "";
+            var msg = choice.GetProperty("message");
+            if (msg.TryGetProperty("reasoning_content", out var rc) && rc.ValueKind == System.Text.Json.JsonValueKind.String)
+                reasoning = rc.GetString() ?? "";
+            if (msg.TryGetProperty("content", out var c) && c.ValueKind == System.Text.Json.JsonValueKind.String)
+                response = c.GetString() ?? "";
+        }
+    }
+
+    private async Task SendAnthropic()
+    {
+        var payload = new
+        {
+            model,
+            stream,
+            max_tokens = maxTokens,
+            messages = new[] { new { role = "user", content = input } },
+        };
+        var req = new HttpRequestMessage(HttpMethod.Post, "/v1/messages");
+        req.Headers.Add("x-api-key", apiKey);
+        req.Content = JsonContent.Create(payload);
+
+        var resp = await Http.SendAsync(req, stream ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead);
+        if (!resp.IsSuccessStatusCode) { response = $"HTTP {(int)resp.StatusCode}: " + await resp.Content.ReadAsStringAsync(); return; }
+
+        if (stream)
+        {
+            using var sr = new StreamReader(await resp.Content.ReadAsStreamAsync());
+            while (!sr.EndOfStream)
+            {
+                var line = await sr.ReadLineAsync();
+                if (line is null) break;
+                if (!line.StartsWith("data:")) continue;
+                var data = line[5..].Trim();
+                using var doc = System.Text.Json.JsonDocument.Parse(data);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("delta", out var delta))
+                {
+                    var changed = false;
+                    if (delta.TryGetProperty("thinking", out var th) && th.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        reasoning += th.GetString();
+                        changed = true;
+                    }
+                    if (delta.TryGetProperty("text", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        response += t.GetString();
+                        changed = true;
+                    }
+                    if (delta.TryGetProperty("stop_reason", out var sr2) && sr2.ValueKind == System.Text.Json.JsonValueKind.String)
+                        finishReason = sr2.GetString() ?? "";
+                    if (changed) await InvokeAsync(StateHasChanged);
+                }
+            }
+        }
+        else
+        {
+            var json = await resp.Content.ReadAsStringAsync();
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("stop_reason", out var sr3) && sr3.ValueKind == System.Text.Json.JsonValueKind.String)
+                finishReason = sr3.GetString() ?? "";
+            if (root.TryGetProperty("content", out var content) && content.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var block in content.EnumerateArray())
+                {
+                    var type = block.TryGetProperty("type", out var bt) ? bt.GetString() : "text";
+                    if (type == "thinking" && block.TryGetProperty("thinking", out var th2))
+                        reasoning += th2.GetString();
+                    else if (type == "text" && block.TryGetProperty("text", out var tx))
+                        response += tx.GetString();
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,257 @@
+@page "/settings"
+@inject HttpClient Http
+@inject IJSRuntime JS
+@inject AppSettingsService Settings
+
+<PageTitle>@Settings.AppName · 设置</PageTitle>
+
+<div class="eg-pagehead">
+    <div>
+        <h1 class="eg-title">设置</h1>
+        <p class="eg-sub">自定义软件名称、Logo 与外观信息</p>
+    </div>
+</div>
+
+<div class="card" style="max-width:680px">
+    <div class="card-header">⚙️ 基础信息</div>
+    <div class="card-body">
+        <div class="mb-3">
+            <label class="form-label">软件名称</label>
+            <input class="form-control" @bind="appName" placeholder="@AppSettingsService.DefaultAppName" />
+            <small class="text-muted">显示在侧栏、浏览器标题与桌面窗口标题上</small>
+        </div>
+        <div class="mb-4">
+            <label class="form-label">副标题 / 描述</label>
+            <input class="form-control" @bind="subtitle" placeholder="@AppSettingsService.DefaultSubtitle" />
+        </div>
+
+        <label class="form-label">Logo</label>
+        <div class="eg-logo-picker">
+            <label class="eg-logo-opt @(logoType == "auto" ? "active" : "")">
+                <input type="radio" name="logoType" checked="@(logoType == "auto")" @onchange='() => logoType = "auto"' />
+                <span class="eg-logo-preview eg-logo-auto">@BrandInitials</span>
+                <span class="eg-logo-name">默认字母</span>
+            </label>
+            <label class="eg-logo-opt @(logoType == "emoji" ? "active" : "")">
+                <input type="radio" name="logoType" checked="@(logoType == "emoji")" @onchange='() => logoType = "emoji"' />
+                <span class="eg-logo-preview">@(logoType == "emoji" && !string.IsNullOrEmpty(logoEmoji) ? logoEmoji : "😀")</span>
+                <span class="eg-logo-name">Emoji</span>
+            </label>
+            <label class="eg-logo-opt @(logoType == "image" ? "active" : "")">
+                <input type="radio" name="logoType" checked="@(logoType == "image")" @onchange='() => logoType = "image"' />
+                <span class="eg-logo-preview">
+                    @if (!string.IsNullOrEmpty(logoImage))
+                    { <img src="@logoImage" alt="logo" /> }
+                    else
+                    { <text>🖼️</text> }
+                </span>
+                <span class="eg-logo-name">上传图片</span>
+            </label>
+        </div>
+
+        @if (logoType == "emoji")
+        {
+            <div class="mt-3">
+                <label class="form-label">选择一个 Emoji</label>
+                <input class="form-control" style="max-width:200px" @bind="logoEmoji" maxlength="4" placeholder="🚀" />
+            </div>
+        }
+        else if (logoType == "image")
+        {
+            <div class="mt-3">
+                <label class="form-label">上传 Logo 图片（建议正方形 PNG，&lt;100KB）</label>
+                <InputFile class="form-control" style="max-width:340px" OnChange="OnLogoFile" accept="image/*" />
+            </div>
+        }
+
+        <div class="d-flex gap-2 mt-4">
+            <button class="btn btn-primary" @onclick="Save" disabled="@saving">
+                @if (saving) { <span class="spinner-border spinner-border-sm"></span> } else { <text>保存</text> }
+            </button>
+            <button class="btn btn-outline-secondary" @onclick="Reset" disabled="@saving">恢复默认</button>
+        </div>
+        @if (saved)
+        {
+            <div class="alert alert-info py-2 small mt-3 mb-0">✅ 已保存，界面已更新。</div>
+        }
+    </div>
+</div>
+
+<div class="card mt-4" style="max-width:680px">
+    <div class="card-header">🌐 监听 / 网络</div>
+    <div class="card-body">
+        <div class="mb-3">
+            <label class="form-label">监听地址</label>
+            <input class="form-control" @bind="listenHost" placeholder="localhost" />
+            <small class="text-muted">网关绑定的网卡地址。可选：<code>localhost</code> / <code>127.0.0.1</code>（仅本机）、<code>0.0.0.0</code> 或 <code>+</code>（所有网卡）、或具体 IP。</small>
+        </div>
+        <div class="mb-3">
+            <label class="form-label">监听端口</label>
+            <input class="form-control" style="max-width:200px" type="number" @bind="listenPort" placeholder="5078" />
+            <small class="text-muted">1–65535。端口被其他程序占用时，启动会提示而不会打开页面。</small>
+        </div>
+        @if (HostIsNonLoopback)
+        {
+            <div class="alert alert-warning py-2 small">
+                ⚠️ 非 <code>localhost</code> 地址会让网关对局域网开放，而 <code>/admin</code> 当前无鉴权——任何能访问该端口的人都可修改配置、读取上游 API Key，请确认网络环境安全。
+            </div>
+        }
+        <div class="alert alert-info py-2 small mb-3">
+            ℹ️ 监听地址与端口仅在启动时读取，<b>保存后需重启服务才能生效</b>。
+        </div>
+        <div class="d-flex gap-2 flex-wrap align-items-center">
+            <button class="btn btn-primary" @onclick="Save" disabled="@(saving || restarting)">
+                @if (saving) { <span class="spinner-border spinner-border-sm"></span> } else { <text>保存</text> }
+            </button>
+            <button class="btn btn-outline-primary" @onclick="Restart" disabled="@(saving || restarting)">
+                @if (restarting) { <span class="spinner-border spinner-border-sm"></span> <text>重启中…</text> }
+                else { <text>🔄 重启服务</text> }
+            </button>
+        </div>
+        @if (restartMsg != null)
+        {
+            <div class="alert alert-info py-2 small mt-3 mb-0">@restartMsg</div>
+        }
+    </div>
+</div>
+
+@code {
+    private string appName = "";
+    private string subtitle = "";
+    private string logoType = "auto";
+    private string logoEmoji = "";
+    private string logoImage = "";
+    private string listenHost = "";
+    private string listenPort = "";
+    private bool saving;
+    private bool saved;
+    private bool restarting;
+    private string? restartMsg;
+
+    protected override void OnInitialized()
+    {
+        appName = Settings.AppName;
+        subtitle = Settings.Subtitle;
+        logoType = Settings.LogoType;
+        if (logoType == "emoji") logoEmoji = Settings.LogoValue;
+        if (logoType == "image") logoImage = Settings.LogoValue;
+        listenHost = Settings.ListenHost;
+        listenPort = Settings.ListenPort.ToString();
+    }
+
+    // Mirrors Program.IsLoopbackHost so the warning shows for 0.0.0.0 / + / IP.
+    private static bool IsLoopbackHost(string? host) =>
+        string.IsNullOrWhiteSpace(host)
+        || host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+        || host == "127.0.0.1" || host == "[::1]" || host == "::1";
+
+    private bool HostIsNonLoopback => !IsLoopbackHost(listenHost);
+
+    private static string ValidatePort(string? raw) =>
+        int.TryParse(raw, out var p) && p is > 0 and <= 65535
+            ? p.ToString()
+            : AppSettingsService.DefaultListenPort.ToString();
+
+    private string BrandInitials
+    {
+        get
+        {
+            var n = (appName ?? Settings.AppName)?.Trim() ?? "";
+            if (n.Length == 0) return "EG";
+            var words = n.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length >= 2 && char.IsAscii(words[0][0]) && char.IsAscii(words[1][0]))
+                return "" + char.ToUpperInvariant(words[0][0]) + char.ToUpperInvariant(words[1][0]);
+            return n[..Math.Min(2, n.Length)].ToUpperInvariant();
+        }
+    }
+
+    private async Task OnLogoFile(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        if (file is null) return;
+        if (file.Size > 200 * 1024)
+        {
+            await JS.InvokeVoidAsync("alert", "图片过大，请选择 200KB 以内的图片。");
+            return;
+        }
+        await using var stream = file.OpenReadStream(200 * 1024);
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms);
+        logoImage = $"data:{file.ContentType};base64,{Convert.ToBase64String(ms.ToArray())}";
+    }
+
+    private async Task Save()
+    {
+        saving = true;
+        saved = false;
+        try
+        {
+            var logoValue = logoType switch
+            {
+                "emoji" => logoEmoji.Trim(),
+                "image" => logoImage,
+                _ => "",
+            };
+            var payload = new Dictionary<string, string>
+            {
+                [AppSettingsService.KeyAppName] = string.IsNullOrWhiteSpace(appName) ? AppSettingsService.DefaultAppName : appName.Trim(),
+                [AppSettingsService.KeySubtitle] = subtitle.Trim(),
+                [AppSettingsService.KeyLogoType] = logoType,
+                [AppSettingsService.KeyLogoValue] = logoValue,
+                [AppSettingsService.KeyListenHost] = string.IsNullOrWhiteSpace(listenHost) ? AppSettingsService.DefaultListenHost : listenHost.Trim(),
+                [AppSettingsService.KeyListenPort] = ValidatePort(listenPort),
+            };
+            var resp = await Http.PutAsJsonAsync("/admin/settings", payload);
+            if (resp.IsSuccessStatusCode)
+            {
+                appName = Settings.AppName;
+                subtitle = Settings.Subtitle;
+                listenHost = Settings.ListenHost;
+                listenPort = Settings.ListenPort.ToString();
+                saved = true;
+            }
+            else
+            {
+                await JS.InvokeVoidAsync("alert", await resp.Content.ReadAsStringAsync());
+            }
+        }
+        finally { saving = false; }
+    }
+
+    // Restarts the whole application (new process). Desktop mode reopens the
+    // window with new settings; in a browser the circuit will drop — refresh.
+    private async Task Restart()
+    {
+        restarting = true;
+        restartMsg = null;
+        try
+        {
+            var resp = await Http.PostAsync("/admin/system/restart", null);
+            if (resp.IsSuccessStatusCode)
+            {
+                restartMsg = "🔄 正在重启服务，请稍候（桌面模式会自动重开窗口；浏览器请手动刷新页面）…";
+            }
+            else
+            {
+                restartMsg = "重启失败：" + await resp.Content.ReadAsStringAsync();
+                restarting = false;
+            }
+        }
+        catch (Exception)
+        {
+            // The connection usually drops as the process exits — that's fine.
+            restartMsg = "重启请求已发出（连接中断属正常现象）。桌面模式会重开窗口；浏览器请手动刷新。";
+            restarting = false;
+        }
+    }
+
+    private async Task Reset()
+    {
+        appName = AppSettingsService.DefaultAppName;
+        subtitle = AppSettingsService.DefaultSubtitle;
+        logoType = "auto";
+        logoEmoji = "";
+        logoImage = "";
+        await Save();
+    }
+}

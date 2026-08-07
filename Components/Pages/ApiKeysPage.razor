@@ -1,0 +1,193 @@
+@page "/apikeys"
+@inject HttpClient Http
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+@inject ToastService Toasts
+
+<PageTitle>API Key 管理</PageTitle>
+
+<div class="eg-pagehead">
+    <div>
+        <h1 class="eg-title">API Key 管理</h1>
+        <p class="eg-sub">客户端凭此 Key 接入网关</p>
+    </div>
+    <button class="btn btn-primary" @onclick="OpenCreate">+ 新建 Key</button>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>📡 调用地址</span>
+        <small class="text-muted">客户端使用下面的地址 + API Key 接入网关</small>
+    </div>
+    <div class="card-body py-2">
+        <table class="table table-sm align-middle mb-2">
+            <tbody>
+                <tr>
+                    <td style="width:160px">OpenAI 兼容</td>
+                    <td><code>@(BaseUrl)v1/chat/completions</code></td>
+                    <td class="text-muted small">Header: <code>Authorization: Bearer &lt;Key&gt;</code></td>
+                    <td style="width:70px"><button class="btn btn-sm btn-outline-secondary" @onclick="@(() => Copy($"{BaseUrl}v1/chat/completions"))">复制</button></td>
+                </tr>
+                <tr>
+                    <td>Anthropic 兼容</td>
+                    <td><code>@(BaseUrl)v1/messages</code></td>
+                    <td class="text-muted small">Header: <code>x-api-key: &lt;Key&gt;</code></td>
+                    <td><button class="btn btn-sm btn-outline-secondary" @onclick="@(() => Copy($"{BaseUrl}v1/messages"))">复制</button></td>
+                </tr>
+                <tr>
+                    <td>模型列表</td>
+                    <td><code>@(BaseUrl)v1/models</code></td>
+                    <td class="text-muted small">GET，同 OpenAI 鉴权</td>
+                    <td><button class="btn btn-sm btn-outline-secondary" @onclick="@(() => Copy($"{BaseUrl}v1/models"))">复制</button></td>
+                </tr>
+                <tr>
+                    <td>SDK Base URL</td>
+                    <td><code>@(BaseUrl)v1</code></td>
+                    <td class="text-muted small">OpenAI/Anthropic SDK 的 <code>base_url</code></td>
+                    <td><button class="btn btn-sm btn-outline-secondary" @onclick="@(() => Copy($"{BaseUrl}v1"))">复制</button></td>
+                </tr>
+            </tbody>
+        </table>
+        <details>
+            <summary class="text-muted small" style="cursor:pointer">curl 示例</summary>
+            <pre class="bg-light border rounded p-2 mt-2 mb-0 small">curl @(BaseUrl)v1/chat/completions \
+  -H "Authorization: Bearer &lt;你的Key&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"&lt;模型名&gt;","messages":[{"role":"user","content":"你好"}]}'</pre>
+        </details>
+    </div>
+</div>
+
+@if (keys is null)
+{
+    <p><span class="spinner-border spinner-border-sm"></span> 加载中...</p>
+}
+else if (keys.Count == 0)
+{
+    <div class="alert alert-info">还没有配置 API Key。注意：没有任何 Key 时网关为开放模式（不鉴权）。</div>
+}
+else
+{
+    <div class="eg-table-card">
+    <table class="table table-hover align-middle">
+        <thead>
+            <tr><th>ID</th><th>名称</th><th>Key</th><th>允许模型</th><th>状态</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            @foreach (var k in keys)
+            {
+                <tr>
+                    <td>@k.Id</td>
+                    <td>@k.Name</td>
+                    <td><code class="text-truncate d-inline-block" style="max-width:200px">@Mask(k.KeyValue)</code></td>
+                    <td><small class="text-muted">@Truncate(k.AllowedModels, 40)</small></td>
+                    <td>
+                        @if (k.Enabled) { <span class="badge bg-success">启用</span> }
+                        else { <span class="badge bg-secondary">停用</span> }
+                    </td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-secondary me-1" @onclick="() => Copy(k.KeyValue)">复制</button>
+                        <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteKey(k.Id)">删除</button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    </div>
+}
+
+@if (showEditor)
+{
+    <div class="modal d-block" tabindex="-1" style="background:rgba(0,0,0,.5)">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">新建 API Key</h5>
+                    <button type="button" class="btn-close" @onclick="CloseEditor"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">名称</label>
+                        <input class="form-control" @bind="editing.Name" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Key (留空自动生成)</label>
+                        <input class="form-control font-monospace" @bind="editing.KeyValue" placeholder="sk-..." />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">允许模型 (逗号分隔, * 表示全部)</label>
+                        <input class="form-control" @bind="editing.AllowedModels" />
+                    </div>
+                    <div class="form-check">
+                        <InputCheckbox id="en" @bind-Value="editing.Enabled" />
+                        <label class="form-check-label" for="en">启用</label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" @onclick="CloseEditor">取消</button>
+                    <button class="btn btn-primary" @onclick="SaveKey" disabled="@saving">
+                        @if (saving) { <span class="spinner-border spinner-border-sm"></span> <text> 保存中…</text> } else { <text>保存</text> }
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private string BaseUrl => Nav.BaseUri;
+    private List<ApiKeyEntity>? keys;
+    private bool showEditor;
+    private bool saving;
+    private ApiKeyEntity editing = new();
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try { keys = await Http.GetFromJsonAsync<List<ApiKeyEntity>>("/admin/apikeys"); }
+        catch { keys = new(); }
+    }
+
+    private void OpenCreate()
+    {
+        editing = new ApiKeyEntity { Enabled = true, AllowedModels = "*" };
+        showEditor = true;
+    }
+
+    private void CloseEditor() => showEditor = false;
+
+    private async Task SaveKey()
+    {
+        saving = true;
+        try
+        {
+            var resp = await Http.PostAsJsonAsync("/admin/apikeys", editing);
+            if (resp.IsSuccessStatusCode)
+            {
+                showEditor = false;
+                Toasts.Ok("API Key 已创建");
+                await LoadAsync();
+            }
+            else { Toasts.Error(await resp.Content.ReadAsStringAsync()); }
+        }
+        finally { saving = false; }
+    }
+
+    private async Task DeleteKey(int id)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", "确认删除此 Key？")) return;
+        await Http.DeleteAsync($"/admin/apikeys/{id}");
+        Toasts.Ok("已删除");
+        await LoadAsync();
+    }
+
+    private async Task Copy(string s)
+    {
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", s);
+        Toasts.Info("已复制到剪贴板");
+    }
+
+    private static string Mask(string k) => k.Length <= 10 ? k : k[..7] + "..." + k[^4..];
+    private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "...";
+}

@@ -1,0 +1,31 @@
+@inject ToastService Toasts
+@implements IDisposable
+
+@if (items.Count > 0)
+{
+    <div class="eg-toast-wrap">
+        @foreach (var t in items)
+        {
+            <div class="eg-toast @t.Kind" @onclick="() => Toasts.Dismiss(t.Id)">
+                <span>@(t.Kind == "ok" ? "✅" : t.Kind == "err" ? "❌" : "ℹ️")</span>
+                <span>@t.Message</span>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private IReadOnlyCollection<ToastService.Toast> items = Array.Empty<ToastService.Toast>();
+
+    protected override void OnInitialized()
+    {
+        Refresh();
+        Toasts.Changed += OnChanged;
+    }
+
+    private void OnChanged() => InvokeAsync(() => { Refresh(); StateHasChanged(); });
+
+    private void Refresh() => items = Toasts.Active.ToList();
+
+    public void Dispose() => Toasts.Changed -= OnChanged;
+}

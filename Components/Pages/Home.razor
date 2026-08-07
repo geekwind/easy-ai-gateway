@@ -1,0 +1,320 @@
+@page "/"
+@inject HttpClient Http
+@inject AppSettingsService Settings
+@using EasyGateway.Services
+
+<PageTitle>@Settings.AppName · 仪表盘</PageTitle>
+
+<div class="eg-pagehead">
+    <div>
+        <h1 class="eg-title">仪表盘</h1>
+        <p class="eg-sub">网关使用情况与消耗概览</p>
+    </div>
+    <a class="btn btn-sm btn-outline-secondary" href="services">去配置服务</a>
+</div>
+
+<UsageFilterBar OnApply="OnFilter" />
+
+@if (loading)
+{
+    <p><span class="spinner-border spinner-border-sm"></span> 加载中...</p>
+}
+else if (stats is not null)
+{
+    <!-- Hero: 真实消耗 Tokens + 关键指标 -->
+    <div class="card eg-hero mb-4">
+        <div class="eg-hero-main">
+            <div class="eg-hero-icon">⚡</div>
+            <div>
+                <div class="eg-hero-label">真实消耗 Tokens</div>
+                <div class="eg-hero-value">@UiFormat.N(stats.TotalTokens)</div>
+                <div class="eg-hero-sub">≈ @UiFormat.Tokens(stats.TotalTokens) tokens</div>
+            </div>
+        </div>
+        <div class="eg-hero-side">
+            <div class="eg-hero-kpi">
+                <div class="eg-hero-kpi-label">总请求数</div>
+                <div class="eg-hero-kpi-value text-primary">@UiFormat.N(stats.Total)</div>
+            </div>
+            <div class="eg-hero-kpi">
+                <div class="eg-hero-kpi-label">成功率</div>
+                <div class="eg-hero-kpi-value @(stats.Failed > 0 ? "text-warning" : "text-success")">@SuccessRate</div>
+            </div>
+            <div class="eg-hero-kpi">
+                <div class="eg-hero-kpi-label">平均延迟</div>
+                <div class="eg-hero-kpi-value">@UiFormat.N(stats.AvgLatencyMs)<small class="eg-unit">ms</small></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 分类统计行 -->
+    <div class="row g-3 mb-4">
+        <div class="col-md col-6">
+            <div class="card eg-mini"><div class="eg-mini-body">
+                <div class="eg-mini-label">📥 新增输入</div>
+                <div class="eg-mini-value">@UiFormat.Tokens(stats.PromptTokens)</div>
+                <div class="eg-mini-sub">@UiFormat.N(stats.PromptTokens) tokens</div>
+            </div></div>
+        </div>
+        <div class="col-md col-6">
+            <div class="card eg-mini"><div class="eg-mini-body">
+                <div class="eg-mini-label">📤 输出</div>
+                <div class="eg-mini-value">@UiFormat.Tokens(stats.CompletionTokens)</div>
+                <div class="eg-mini-sub">@UiFormat.N(stats.CompletionTokens) tokens</div>
+            </div></div>
+        </div>
+        <div class="col-md col-6">
+            <div class="card eg-mini"><div class="eg-mini-body">
+                <div class="eg-mini-label">🧠 推理</div>
+                <div class="eg-mini-value">@UiFormat.Tokens(stats.ReasoningTokens)</div>
+                <div class="eg-mini-sub">@UiFormat.N(stats.ReasoningTokens) tokens</div>
+            </div></div>
+        </div>
+        <div class="col-md col-6">
+            <div class="card eg-mini"><div class="eg-mini-body">
+                <div class="eg-mini-label">✅ 成功 / 失败</div>
+                <div class="eg-mini-value"><span class="text-success">@UiFormat.N(stats.Success)</span> <span class="eg-sep">/</span> <span class="text-danger">@UiFormat.N(stats.Failed)</span></div>
+                <div class="eg-mini-sub">请求成功 ✓ / 失败 ✗</div>
+            </div></div>
+        </div>
+        <div class="col-md col-12">
+            <div class="card eg-mini"><div class="eg-mini-body">
+                <div class="eg-mini-label d-flex justify-content-between"><span>🗄️ 缓存命中率</span><span class="text-success fw-bold">@CacheHitRate</span></div>
+                <div class="progress mt-2" style="height:8px">
+                    <div class="progress-bar bg-success" style="width:@CacheHitRate"></div>
+                </div>
+                <div class="eg-mini-sub mt-2">命中 @UiFormat.N(stats.CacheHitCount) 次 · 读取 @UiFormat.Tokens(stats.CacheReadTokens) tokens</div>
+            </div></div>
+        </div>
+    </div>
+
+    <!-- 使用趋势（平滑面积图） -->
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>📈 使用趋势</span>
+            <small class="text-muted">
+                <span class="eg-legend"><i style="background:#6366f1"></i>请求</span>
+                <span class="eg-legend"><i style="background:#22c55e"></i>Tokens</span>
+                <span class="eg-legend"><i style="background:#ef4444"></i>失败</span>
+            </small>
+        </div>
+        <div class="card-body">
+            @if (hourly is null || hourly.All(h => h.Success + h.Failed == 0 && h.TotalTokens == 0))
+            {
+                <p class="text-muted text-center my-5">暂无请求数据</p>
+            }
+            else
+            {
+                <svg viewBox="0 0 @ChartW @ChartH" style="width:100%;height:280px" preserveAspectRatio="none">
+                    <defs>
+                        <linearGradient id="gReq" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stop-color="#6366f1" stop-opacity="0.28" />
+                            <stop offset="100%" stop-color="#6366f1" stop-opacity="0.02" />
+                        </linearGradient>
+                        <linearGradient id="gTok" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stop-color="#22c55e" stop-opacity="0.24" />
+                            <stop offset="100%" stop-color="#22c55e" stop-opacity="0.02" />
+                        </linearGradient>
+                    </defs>
+
+                    @* horizontal gridlines *@
+                    @for (var gi = 1; gi <= 4; gi++)
+                    {
+                        var gy = Pad + (ChartH - Pad - BottomPad) * gi / 4.0;
+                        <line x1="@Pad" y1="@F(gy)" x2="@(ChartW - Pad)" y2="@F(gy)" stroke="#eef0f6" stroke-width="1" />
+                    }
+
+                    @* Tokens area + line *@
+                    <path d="@AreaPath(tokPoints)" fill="url(#gTok)" />
+                    <path d="@LinePath(tokPoints)" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" />
+
+                    @* Requests area + line *@
+                    <path d="@AreaPath(reqPoints)" fill="url(#gReq)" />
+                    <path d="@LinePath(reqPoints)" fill="none" stroke="#6366f1" stroke-width="2.2" stroke-linecap="round" />
+
+                    @* Failed line (dashed) *@
+                    @if (hourly.Any(h => h.Failed > 0))
+                    {
+                        <path d="@LinePath(failPoints)" fill="none" stroke="#ef4444" stroke-width="1.6" stroke-dasharray="4 3" stroke-linecap="round" />
+                    }
+
+                    @* x-axis *@
+                    <line x1="@Pad" y1="@(ChartH - BottomPad)" x2="@(ChartW - Pad)" y2="@(ChartH - BottomPad)" stroke="#e2e5ee" stroke-width="1" />
+                    @for (var i = 0; i < hourly.Count; i += 3)
+                    {
+                        @AxisLabel(F(X(i)), ChartH - 8, hourly[i].Hour)
+                    }
+                </svg>
+            }
+        </div>
+    </div>
+
+    <!-- 占比 + 明细 -->
+    <div class="row g-3 mb-4">
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">🤖 按模型</div>
+                <div class="card-body">
+                    @if (stats.ByModel.Count == 0)
+                    {
+                        <p class="text-muted text-center my-4">暂无数据</p>
+                    }
+                    else
+                    {
+                        @foreach (var kv in stats.ByModel.OrderByDescending(x => x.Value).Take(8))
+                        {
+                            var pct = kv.Value * 100 / Math.Max(1, stats.Total);
+                            <div class="mb-3">
+                                <div class="d-flex justify-content-between small mb-1">
+                                    <span class="text-truncate fw-600" style="max-width:70%">@kv.Key</span>
+                                    <span class="text-muted">@UiFormat.N(kv.Value) · @pct%</span>
+                                </div>
+                                <div class="progress" style="height:6px">
+                                    <div class="progress-bar" style="width:@pct%"></div>
+                                </div>
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">🔌 按服务</div>
+                <div class="card-body">
+                    @if (stats.ByService.Count == 0)
+                    {
+                        <p class="text-muted text-center my-4">暂无数据</p>
+                    }
+                    else
+                    {
+                        @foreach (var kv in stats.ByService.OrderByDescending(x => x.Value).Take(8))
+                        {
+                            var pct = kv.Value * 100 / Math.Max(1, stats.Total);
+                            <div class="mb-3">
+                                <div class="d-flex justify-content-between small mb-1">
+                                    <span class="text-truncate fw-600" style="max-width:70%">@kv.Key</span>
+                                    <span class="text-muted">@UiFormat.N(kv.Value) · @pct%</span>
+                                </div>
+                                <div class="progress" style="height:6px">
+                                    <div class="progress-bar bg-info" style="width:@pct%"></div>
+                                </div>
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private const int ChartW = 760;
+    private const int ChartH = 280;
+    private const int Pad = 8;
+    private const int BottomPad = 26;
+
+    private UsageStats? stats;
+    private List<HourlyBucket>? hourly;
+    private bool loading = true;
+    private UsageFilterBar.FilterValues filter = new(24, "", "", "", "", "");
+
+    private List<(double x, double y)> reqPoints = new();
+    private List<(double x, double y)> tokPoints = new();
+    private List<(double x, double y)> failPoints = new();
+
+    private string SuccessRate => stats is null || stats.Total == 0
+        ? "—" : $"{stats.Success * 100 / stats.Total}%";
+
+    private string CacheHitRate
+    {
+        get
+        {
+            if (stats is null) return "0%";
+            var total = stats.CacheReadTokens + stats.PromptTokens;
+            if (total <= 0) return stats.CacheHitCount > 0 ? "100%" : "0%";
+            var pct = (int)Math.Round(stats.CacheReadTokens * 100.0 / total);
+            return $"{Math.Clamp(pct, 0, 100)}%";
+        }
+    }
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task OnFilter(UsageFilterBar.FilterValues f)
+    {
+        filter = f;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        StateHasChanged();
+        var qs = $"?hours={filter.Hours}&model={Uri.EscapeDataString(filter.Model)}" +
+                 $"&service={Uri.EscapeDataString(filter.Service)}&provider={Uri.EscapeDataString(filter.Provider)}";
+        try
+        {
+            stats = await Http.GetFromJsonAsync<UsageStats>("/admin/usage" + qs);
+            hourly = await Http.GetFromJsonAsync<List<HourlyBucket>>("/admin/usage/hourly" + qs);
+            BuildSeries();
+        }
+        catch
+        {
+            stats ??= new UsageStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, new(), new(), new());
+            hourly ??= new();
+        }
+        loading = false;
+    }
+
+    private void BuildSeries()
+    {
+        if (hourly is null || hourly.Count == 0) return;
+        var plotH = ChartH - Pad - BottomPad;
+        var maxReq = Math.Max(1, hourly.Max(h => h.Success + h.Failed));
+        var maxTok = Math.Max(1, hourly.Max(h => h.TotalTokens));
+
+        reqPoints = new(); tokPoints = new(); failPoints = new();
+        for (var i = 0; i < hourly.Count; i++)
+        {
+            var x = X(i);
+            var b = hourly[i];
+            reqPoints.Add((x, Pad + plotH - (b.Success + b.Failed) * plotH / (double)maxReq));
+            tokPoints.Add((x, Pad + plotH - b.TotalTokens * plotH / (double)maxTok));
+            failPoints.Add((x, Pad + plotH - b.Failed * plotH / (double)maxReq));
+        }
+    }
+
+    private double X(int i) => Pad + i * (ChartW - 2 * Pad) / (double)Math.Max(1, (hourly?.Count ?? 1) - 1);
+
+    // Smooth polyline via Catmull-Rom → cubic Bézier for a soft area/line chart.
+    private static string LinePath(List<(double x, double y)> p)
+    {
+        if (p.Count == 0) return "";
+        if (p.Count == 1) return $"M {F(p[0].x)} {F(p[0].y)}";
+        var sb = new System.Text.StringBuilder($"M {F(p[0].x)} {F(p[0].y)}");
+        for (var i = 0; i < p.Count - 1; i++)
+        {
+            var p0 = p[Math.Max(0, i - 1)];
+            var p1 = p[i];
+            var p2 = p[i + 1];
+            var p3 = p[Math.Min(p.Count - 1, i + 2)];
+            var c1x = p1.x + (p2.x - p0.x) / 6.0; var c1y = p1.y + (p2.y - p0.y) / 6.0;
+            var c2x = p2.x - (p3.x - p1.x) / 6.0; var c2y = p2.y - (p3.y - p1.y) / 6.0;
+            sb.Append($" C {F(c1x)} {F(c1y)}, {F(c2x)} {F(c2y)}, {F(p2.x)} {F(p2.y)}");
+        }
+        return sb.ToString();
+    }
+
+    private string AreaPath(List<(double x, double y)> p)
+    {
+        if (p.Count == 0) return "";
+        var baseline = ChartH - BottomPad;
+        return $"{LinePath(p)} L {F(p[^1].x)} {F(baseline)} L {F(p[0].x)} {F(baseline)} Z";
+    }
+
+    // SVG attributes need invariant-culture decimals.
+    private static string F(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static MarkupString AxisLabel(string x, int y, string label) => (MarkupString)
+        $"<text x=\"{x}\" y=\"{y}\" font-size=\"10\" fill=\"#9aa3b8\" text-anchor=\"middle\">{label}</text>";
+}
